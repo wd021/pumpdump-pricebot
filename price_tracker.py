@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import aiohttp
 from dotenv import load_dotenv
 from supabase import create_client, Client
+from functools import partial
 
 # Configure logging
 logging.basicConfig(
@@ -21,6 +22,11 @@ SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 UPDATE_INTERVAL = 5  # seconds
 RETRY_INTERVAL = 300  # 5 minutes in seconds
+
+async def run_in_executor(func, *args):
+    """Helper function to run blocking operations in executor"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, partial(func, *args))
 
 class PriceTracker:
     def __init__(self):
@@ -41,13 +47,14 @@ class PriceTracker:
     async def get_asset(self, asset_id):
         """Get asset information from t_crypto_assets"""
         try:
-            response = await asyncio.to_thread(
-                self.supabase.table('t_crypto_assets')
-                .select('*')
-                .eq('id', asset_id)
-                .single()
-                .execute
-            )
+            def fetch_asset():
+                return self.supabase.table('t_crypto_assets') \
+                    .select('*') \
+                    .eq('id', asset_id) \
+                    .single() \
+                    .execute()
+
+            response = await run_in_executor(fetch_asset)
             return response.data
         except Exception as e:
             logger.error(f"Error fetching asset: {e}")
@@ -58,14 +65,15 @@ class PriceTracker:
         now = datetime.now(timezone.utc)
         
         try:
-            response = await asyncio.to_thread(
-                self.supabase.table('t_prediction_periods')
-                .select('*')
-                .filter('starts_at', 'lte', now.isoformat())
-                .filter('ends_at', 'gt', now.isoformat())
-                .filter('is_active', 'eq', True)
-                .execute
-            )
+            def fetch_period():
+                return self.supabase.table('t_prediction_periods') \
+                    .select('*') \
+                    .filter('starts_at', 'lte', now.isoformat()) \
+                    .filter('ends_at', 'gt', now.isoformat()) \
+                    .filter('is_active', 'eq', True) \
+                    .execute()
+
+            response = await run_in_executor(fetch_period)
             
             if response.data:
                 period = response.data[0]
@@ -138,13 +146,11 @@ class PriceTracker:
         # Fetch both current price and candle data concurrently
         current_price_task = self.fetch_current_price(api_ticker)
         candle_data_task = self.fetch_candle_data(api_ticker, start_time, end_time)
-
+        
         current_price, candle_data = await asyncio.gather(
             current_price_task,
             candle_data_task
         )
-
-        logger.info(f"[{datetime.now(timezone.utc)}] Fetched data for {api_ticker}: {current_price} {candle_data}")
 
         if current_price is None or candle_data is None:
             return None
@@ -158,17 +164,18 @@ class PriceTracker:
     async def update_period_prices(self, period, prices):
         """Update period with new prices"""
         try:
-            await asyncio.to_thread(
-                self.supabase.table('t_prediction_periods')
-                .update({
-                    'current_price': prices['current_price'],
-                    'current_high': prices['current_high'],
-                    'current_low': prices['current_low'],
-                    'updated_at': datetime.now(timezone.utc).isoformat()
-                })
-                .eq('id', period['id'])
-                .execute
-            )
+            def update_prices():
+                return self.supabase.table('t_prediction_periods') \
+                    .update({
+                        'current_price': prices['current_price'],
+                        'current_high': prices['current_high'],
+                        'current_low': prices['current_low'],
+                        'updated_at': datetime.now(timezone.utc).isoformat()
+                    }) \
+                    .eq('id', period['id']) \
+                    .execute()
+
+            await run_in_executor(update_prices)
             logger.info(f"Updated prices for period {period['id']}: {prices}")
             
         except Exception as e:
